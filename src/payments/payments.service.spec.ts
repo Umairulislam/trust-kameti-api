@@ -1,448 +1,547 @@
-import { Test, TestingModule } from '@nestjs/testing';
 import {
-  NotFoundException,
-  ForbiddenException,
   BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PaymentsService } from './payments.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ReceiptStorageService } from './receipt-storage.service';
 
 describe('PaymentsService', () => {
-  let service: PaymentsService;
-
-  const adminId = 'admin-1';
-  const otherAdminId = 'admin-2';
-  const memberId = 'user-1';
-  const committeeId = 'comm-1';
-  const cycleId = 'cycle-1';
-  const contributionId = 'contrib-1';
-  const memberRecordId = 'mem-1';
-
-  const mockCommittee = {
-    id: committeeId,
-    name: 'Test Committee',
-    createdBy: adminId,
-    contributionAmount: { toNumber: () => 10000 },
+  const amount = new Prisma.Decimal(5000);
+  const receipt = {
+    id: 'receipt-1',
+    mimeType: 'image/png',
+    size: 100,
+    uploadedAt: new Date(),
   };
-
-  const mockCycle = {
-    id: cycleId,
-    committeeId,
-    cycleNumber: 1,
-    status: 'ACTIVE',
-    totalCollected: { toNumber: () => 0 },
+  const file = { buffer: Buffer.from('image'), mimetype: 'image/png', size: 5 };
+  const dto = {
+    contributionId: 'contribution-1',
+    amount: 5000,
+    transactionReference: 'REF-1',
+    paymentMethod: 'EASYPAISA' as const,
   };
-
-  const mockContribution = {
-    id: contributionId,
-    cycleId,
-    memberId: memberRecordId,
-    amount: { toNumber: () => 10000 },
+  const committee = { id: 'committee-1', createdBy: 'admin-1' };
+  const contribution = {
+    id: 'contribution-1',
+    cycleId: 'cycle-1',
+    memberId: 'member-1',
+    amount,
     status: 'PENDING',
-    paidAt: null,
-    paymentId: null,
-    cycle: { committeeId },
+    cycle: { committeeId: 'committee-1', status: 'ACTIVE' },
+    member: { userId: 'user-1', user: { id: 'user-1' } },
   };
-
-  const mockPaidContribution = {
-    ...mockContribution,
-    status: 'PAID',
-  };
-
-  const mockPayment = {
-    id: 'pay-1',
-    contributionId,
-    memberId: memberRecordId,
-    amount: { toNumber: () => 10000 },
-    transactionReference: 'TXN-001',
+  const payment = {
+    id: 'payment-1',
+    contributionId: contribution.id,
+    memberId: 'member-1',
+    amount,
     status: 'PENDING',
-    paidAt: new Date(),
-    verifiedAt: null,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-    contribution: {
-      id: contributionId,
-      cycleId,
-      memberId: memberRecordId,
-      amount: { toNumber: () => 10000 },
-      status: 'PENDING',
-      member: {
-        id: memberRecordId,
-        role: 'MEMBER',
-        status: 'ACTIVE',
-        user: { id: memberId, name: 'User 1', email: 'user1@test.com', phone: null },
-      },
-    },
+    receipt,
+    contribution,
   };
-
-  const mockPrisma = {
+  const prisma = {
     committee: { findUnique: jest.fn() },
-    committeeMember: { findUnique: jest.fn(), findMany: jest.fn() },
-    contribution: { findFirst: jest.fn(), update: jest.fn() },
-    cycle: { findMany: jest.fn(), update: jest.fn() },
-    payment: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), count: jest.fn(), update: jest.fn() },
+    committeeMember: { findUnique: jest.fn() },
+    contribution: { findFirst: jest.fn(), updateMany: jest.fn() },
+    payment: {
+      findFirst: jest.fn(),
+      findUnique: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+      findMany: jest.fn(),
+      count: jest.fn(),
+    },
+    paymentReceipt: { create: jest.fn() },
+    cycle: { updateMany: jest.fn() },
     auditLog: { create: jest.fn() },
+    $queryRaw: jest.fn(),
     $transaction: jest.fn(),
   };
+  const notifications = { create: jest.fn() };
+  const storage = { save: jest.fn(), read: jest.fn(), remove: jest.fn() };
+  const service = new PaymentsService(
+    prisma as unknown as PrismaService,
+    notifications as unknown as NotificationsService,
+    storage as unknown as ReceiptStorageService,
+  );
 
-  const mockAuditService = { log: jest.fn() };
-  const mockNotificationsService = { create: jest.fn(), createMany: jest.fn() };
-
-  beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        PaymentsService,
-        { provide: PrismaService, useValue: mockPrisma },
-        { provide: AuditService, useValue: mockAuditService },
-        { provide: NotificationsService, useValue: mockNotificationsService },
-      ],
-    }).compile();
-
-    service = module.get<PaymentsService>(PaymentsService);
+  beforeEach(() => {
     jest.resetAllMocks();
+    prisma.committee.findUnique.mockResolvedValue(committee);
+    prisma.committeeMember.findUnique.mockResolvedValue({
+      id: 'member-1',
+      status: 'ACTIVE',
+    });
+    prisma.contribution.findFirst.mockResolvedValue(contribution);
+    prisma.contribution.updateMany.mockResolvedValue({ count: 1 });
+    prisma.cycle.updateMany.mockResolvedValue({ count: 1 });
+    prisma.payment.findFirst.mockResolvedValue(payment);
+    prisma.payment.findUnique.mockResolvedValue({
+      contributionId: contribution.id,
+    });
+    prisma.payment.findUniqueOrThrow.mockResolvedValue(payment);
+    prisma.payment.create.mockResolvedValue({ ...payment, receipt: null });
+    prisma.payment.update.mockResolvedValue({ ...payment, status: 'VERIFIED' });
+    prisma.$transaction.mockImplementation(
+      (action: (tx: typeof prisma) => Promise<unknown>) => action(prisma),
+    );
+    storage.save.mockResolvedValue(receipt);
+    storage.read.mockResolvedValue(file.buffer);
   });
 
-  describe('create', () => {
-    it('should create a payment for a valid PENDING contribution', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.committeeMember.findUnique.mockResolvedValue({ id: memberRecordId, status: 'ACTIVE' });
-      mockPrisma.contribution.findFirst.mockResolvedValue(mockContribution);
-      mockPrisma.payment.create.mockResolvedValue(mockPayment);
+  describe('claim submission', () => {
+    beforeEach(() => prisma.payment.findFirst.mockResolvedValue(null));
 
-      const result = await service.create(committeeId, {
-        contributionId,
-        amount: 10000,
-        transactionReference: 'TXN-001',
-      }, memberId);
-
-      expect(result.id).toBe('pay-1');
+    it('creates a pending claim with the server amount and an audit record, without crediting dues', async () => {
+      const result = await service.create(committee.id, dto, 'user-1');
       expect(result.status).toBe('PENDING');
+      expect(prisma.payment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            amount,
+            memberId: 'member-1',
+            status: 'PENDING',
+            paymentMethod: 'EASYPAISA',
+          }),
+        }),
+      );
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'PAYMENT_SUBMITTED',
+            actorId: 'user-1',
+          }),
+        }),
+      );
+      expect(prisma.contribution.updateMany).not.toHaveBeenCalled();
+      expect(prisma.cycle.updateMany).not.toHaveBeenCalled();
     });
 
-    it('should reject if contribution is already PAID', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.committeeMember.findUnique.mockResolvedValue({ id: memberRecordId, status: 'ACTIVE' });
-      mockPrisma.contribution.findFirst.mockResolvedValue(mockPaidContribution);
+    it('allows the organiser to record on behalf of the contribution member', async () => {
+      await service.create(committee.id, dto, 'admin-1');
+      expect(prisma.payment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ memberId: 'member-1' }),
+        }),
+      );
+    });
 
+    it('rejects another member submitting this contribution', async () => {
       await expect(
-        service.create(committeeId, {
-          contributionId,
-          amount: 10000,
-          transactionReference: 'TXN-002',
-        }, memberId),
-      ).rejects.toThrow(BadRequestException);
+        service.create(committee.id, dto, 'other-user'),
+      ).rejects.toThrow(ForbiddenException);
+      expect(prisma.payment.create).not.toHaveBeenCalled();
     });
 
-    it('should reject if payment amount does not match contribution amount', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.committeeMember.findUnique.mockResolvedValue({ id: memberRecordId, status: 'ACTIVE' });
-      mockPrisma.contribution.findFirst.mockResolvedValue(mockContribution);
+    it.each(['INACTIVE', 'INVITED', 'REMOVED'])(
+      'rejects %s membership',
+      async (status) => {
+        prisma.committeeMember.findUnique.mockResolvedValue({ status });
+        await expect(
+          service.create(committee.id, dto, 'user-1'),
+        ).rejects.toThrow(ForbiddenException);
+      },
+    );
 
+    it('rejects outsiders', async () => {
+      prisma.committeeMember.findUnique.mockResolvedValue(null);
       await expect(
-        service.create(committeeId, {
-          contributionId,
-          amount: 5000,
-          transactionReference: 'TXN-003',
-        }, memberId),
-      ).rejects.toThrow(BadRequestException);
+        service.create(committee.id, dto, 'outsider'),
+      ).rejects.toThrow(ForbiddenException);
     });
 
-    it('should reject if contribution not found', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.committeeMember.findUnique.mockResolvedValue({ id: memberRecordId, status: 'ACTIVE' });
-      mockPrisma.contribution.findFirst.mockResolvedValue(null);
-
-      await expect(
-        service.create(committeeId, {
-          contributionId: 'nonexistent',
-          amount: 10000,
-          transactionReference: 'TXN-004',
-        }, memberId),
-      ).rejects.toThrow(NotFoundException);
+    it('rejects missing contributions', async () => {
+      prisma.contribution.findFirst.mockResolvedValue(null);
+      await expect(service.create(committee.id, dto, 'user-1')).rejects.toThrow(
+        NotFoundException,
+      );
     });
 
-    it('should reject if contribution belongs to a different committee', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.committeeMember.findUnique.mockResolvedValue({ id: memberRecordId, status: 'ACTIVE' });
-      mockPrisma.contribution.findFirst.mockResolvedValue({
-        ...mockContribution,
-        cycle: { committeeId: 'other-comm' },
+    it('rejects another committee contribution', async () => {
+      prisma.contribution.findFirst.mockResolvedValue({
+        ...contribution,
+        cycle: { committeeId: 'other', status: 'ACTIVE' },
       });
-
-      await expect(
-        service.create(committeeId, {
-          contributionId,
-          amount: 10000,
-          transactionReference: 'TXN-005',
-        }, memberId),
-      ).rejects.toThrow(ForbiddenException);
+      await expect(service.create(committee.id, dto, 'user-1')).rejects.toThrow(
+        ForbiddenException,
+      );
     });
 
-    it('should reject access for non-member', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.committeeMember.findUnique.mockResolvedValue(null);
-
-      await expect(
-        service.create(committeeId, {
-          contributionId,
-          amount: 10000,
-          transactionReference: 'TXN-006',
-        }, 'outsider'),
-      ).rejects.toThrow(ForbiddenException);
+    it('rejects paid contributions', async () => {
+      prisma.contribution.findFirst.mockResolvedValue({
+        ...contribution,
+        status: 'PAID',
+      });
+      await expect(service.create(committee.id, dto, 'user-1')).rejects.toThrow(
+        BadRequestException,
+      );
     });
 
-    it('should allow OVERDUE contributions to receive payments', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.committeeMember.findUnique.mockResolvedValue({ id: memberRecordId, status: 'ACTIVE' });
-      mockPrisma.contribution.findFirst.mockResolvedValue({
-        ...mockContribution,
+    it('accepts overdue contributions', async () => {
+      prisma.contribution.findFirst.mockResolvedValue({
+        ...contribution,
         status: 'OVERDUE',
       });
-      mockPrisma.payment.create.mockResolvedValue(mockPayment);
-
-      const result = await service.create(committeeId, {
-        contributionId,
-        amount: 10000,
-        transactionReference: 'TXN-007',
-      }, memberId);
-
-      expect(result.id).toBe('pay-1');
+      await expect(
+        service.create(committee.id, dto, 'user-1'),
+      ).resolves.toHaveProperty('status', 'PENDING');
     });
 
-    it('should attribute payment to the contribution member when admin records on behalf', async () => {
-      // Admin is the committee creator without a membership record.
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.contribution.findFirst.mockResolvedValue(mockContribution);
-      mockPrisma.payment.create.mockResolvedValue(mockPayment);
+    it.each([4999.99, 5000.01, 100])(
+      'requires an exact amount: %s',
+      async (value) => {
+        await expect(
+          service.create(committee.id, { ...dto, amount: value }, 'user-1'),
+        ).rejects.toThrow(BadRequestException);
+      },
+    );
 
-      const result = await service.create(committeeId, {
-        contributionId,
-        amount: 10000,
-        transactionReference: 'TXN-008',
-      }, adminId);
+    it.each(['COMPLETED', 'CANCELLED', 'UPCOMING'])(
+      'rejects a %s cycle',
+      async (status) => {
+        prisma.contribution.findFirst.mockResolvedValue({
+          ...contribution,
+          cycle: { ...contribution.cycle, status },
+        });
+        await expect(
+          service.create(committee.id, dto, 'user-1'),
+        ).rejects.toThrow(BadRequestException);
+      },
+    );
 
-      expect(mockPrisma.payment.create).toHaveBeenCalledWith(
+    it('prevents multiple pending claims while allowing a fresh claim after rejection', async () => {
+      prisma.payment.findFirst
+        .mockResolvedValueOnce({ id: 'existing' })
+        .mockResolvedValueOnce(null);
+      await expect(service.create(committee.id, dto, 'user-1')).rejects.toThrow(
+        ConflictException,
+      );
+      await expect(
+        service.create(committee.id, dto, 'user-1'),
+      ).resolves.toHaveProperty('status', 'PENDING');
+      expect(prisma.payment.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ memberId: memberRecordId }),
+          where: { contributionId: contribution.id, status: 'PENDING' },
         }),
       );
-      expect(result.id).toBe('pay-1');
     });
   });
 
-  describe('findAll', () => {
-    it('should return paginated payments for committee admin', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.cycle.findMany.mockResolvedValue([{ id: cycleId }]);
-      mockPrisma.payment.findMany.mockResolvedValue([mockPayment]);
-      mockPrisma.payment.count.mockResolvedValue(1);
-
-      const result = await service.findAll(committeeId, {}, adminId);
-
-      expect(result.data).toHaveLength(1);
-      expect(result.total).toBe(1);
-      expect(result.page).toBe(1);
-    });
-
-    it('should filter by status', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.cycle.findMany.mockResolvedValue([{ id: cycleId }]);
-      mockPrisma.payment.findMany.mockResolvedValue([]);
-      mockPrisma.payment.count.mockResolvedValue(0);
-
-      await service.findAll(committeeId, { status: 'VERIFIED' as any }, adminId);
-
-      expect(mockPrisma.payment.findMany).toHaveBeenCalledWith(
+  describe('receipts', () => {
+    it('attaches a receipt and audits it without marking the payment paid', async () => {
+      prisma.payment.findFirst.mockResolvedValue({ ...payment, receipt: null });
+      prisma.payment.findUniqueOrThrow
+        .mockResolvedValueOnce({ ...payment, receipt: null })
+        .mockResolvedValueOnce(payment);
+      const result = await service.uploadReceipt(
+        committee.id,
+        payment.id,
+        'user-1',
+        file,
+      );
+      expect(result.status).toBe('PENDING');
+      expect(prisma.paymentReceipt.create).toHaveBeenCalledWith({
+        data: {
+          id: receipt.id,
+          paymentId: payment.id,
+          mimeType: receipt.mimeType,
+          size: receipt.size,
+          uploadedBy: 'user-1',
+        },
+      });
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({ status: 'VERIFIED' }),
+          data: expect.objectContaining({ action: 'PAYMENT_RECEIPT_UPLOADED' }),
         }),
       );
+      expect(prisma.contribution.updateMany).not.toHaveBeenCalled();
+      expect(prisma.cycle.updateMany).not.toHaveBeenCalled();
+      expect(prisma.payment.update).not.toHaveBeenCalled();
     });
 
-    it('should reject access for non-member', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.committeeMember.findUnique.mockResolvedValue(null);
+    it.each(['user-1', 'admin-1'])(
+      'allows %s to view the receipt',
+      async (user) => {
+        await expect(
+          service.getReceipt(committee.id, payment.id, user),
+        ).resolves.toEqual({
+          buffer: file.buffer,
+          mimeType: 'image/png',
+        });
+      },
+    );
 
+    it('blocks other members from viewing or uploading receipts', async () => {
       await expect(
-        service.findAll(committeeId, {}, 'outsider'),
+        service.getReceipt(committee.id, payment.id, 'other-user'),
+      ).rejects.toThrow(ForbiddenException);
+      await expect(
+        service.uploadReceipt(committee.id, payment.id, 'other-user', file),
+      ).rejects.toThrow(ForbiddenException);
+      expect(storage.read).not.toHaveBeenCalled();
+      expect(storage.save).not.toHaveBeenCalled();
+    });
+
+    it('blocks cross-committee receipt access', async () => {
+      prisma.payment.findFirst.mockResolvedValue({
+        ...payment,
+        contribution: {
+          ...contribution,
+          cycle: { ...contribution.cycle, committeeId: 'another' },
+        },
+      });
+      await expect(
+        service.getReceipt(committee.id, payment.id, 'admin-1'),
       ).rejects.toThrow(ForbiddenException);
     });
-  });
 
-  describe('findOne', () => {
-    it('should return a payment with contribution info', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.payment.findFirst.mockResolvedValue({
-        ...mockPayment,
-        contribution: { ...mockPayment.contribution, cycle: { committeeId } },
-      });
-
-      const result = await service.findOne(committeeId, 'pay-1', adminId);
-
-      expect(result.id).toBe('pay-1');
-    });
-
-    it('should throw NotFoundException for non-existent payment', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.payment.findFirst.mockResolvedValue(null);
-
+    it('returns 404 when there is no receipt', async () => {
+      prisma.payment.findFirst.mockResolvedValue({ ...payment, receipt: null });
       await expect(
-        service.findOne(committeeId, 'nonexistent', adminId),
+        service.getReceipt(committee.id, payment.id, 'user-1'),
       ).rejects.toThrow(NotFoundException);
     });
 
-    it('should reject if payment belongs to different committee', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.payment.findFirst.mockResolvedValue({
-        ...mockPayment,
-        contribution: { ...mockPayment.contribution, cycle: { committeeId: 'other-comm' } },
-      });
-
+    it('does not replace an existing receipt', async () => {
       await expect(
-        service.findOne(committeeId, 'pay-1', adminId),
-      ).rejects.toThrow(ForbiddenException);
+        service.uploadReceipt(committee.id, payment.id, 'user-1', file),
+      ).rejects.toThrow(ConflictException);
+      expect(storage.save).not.toHaveBeenCalled();
+    });
+
+    it.each(['VERIFIED', 'REJECTED'])(
+      'does not upload to a %s claim',
+      async (status) => {
+        prisma.payment.findFirst.mockResolvedValue({
+          ...payment,
+          status,
+          receipt: null,
+        });
+        await expect(
+          service.uploadReceipt(committee.id, payment.id, 'user-1', file),
+        ).rejects.toThrow(BadRequestException);
+        expect(storage.save).not.toHaveBeenCalled();
+      },
+    );
+
+    it('cleans up a saved file when a competing upload already attached a receipt', async () => {
+      prisma.payment.findFirst.mockResolvedValue({ ...payment, receipt: null });
+      await expect(
+        service.uploadReceipt(committee.id, payment.id, 'user-1', file),
+      ).rejects.toThrow(ConflictException);
+      expect(storage.remove).toHaveBeenCalledWith(receipt.id);
+    });
+
+    it('cleans up a saved file when the audit write fails', async () => {
+      prisma.payment.findFirst.mockResolvedValue({ ...payment, receipt: null });
+      prisma.payment.findUniqueOrThrow.mockResolvedValue({
+        ...payment,
+        receipt: null,
+      });
+      prisma.auditLog.create.mockRejectedValue(new Error('database failure'));
+      await expect(
+        service.uploadReceipt(committee.id, payment.id, 'user-1', file),
+      ).rejects.toThrow('database failure');
+      expect(storage.remove).toHaveBeenCalledWith(receipt.id);
     });
   });
 
-  describe('verify', () => {
-    it('should atomically verify payment, update contribution, and cycle total', async () => {
-      const paymentWithCycle = {
-        ...mockPayment,
-        contribution: { ...mockPayment.contribution, cycle: { ...mockCycle, committeeId } },
-      };
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.payment.findFirst.mockResolvedValue(paymentWithCycle);
-      mockPrisma.$transaction.mockResolvedValue([
-        { ...mockPayment, status: 'VERIFIED', verifiedAt: new Date() },
-        { ...mockContribution, status: 'PAID' },
-        { ...mockCycle, totalCollected: 10000 },
+  describe('admin decisions', () => {
+    it('credits dues and cycle totals, verifies, and audits within one transaction', async () => {
+      await service.verify(committee.id, payment.id, 'admin-1');
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.$queryRaw).toHaveBeenCalled();
+      expect(prisma.contribution.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: contribution.id, status: { not: 'PAID' } },
+          data: expect.objectContaining({
+            status: 'PAID',
+            paymentId: payment.id,
+          }),
+        }),
+      );
+      expect(prisma.cycle.updateMany).toHaveBeenCalledWith({
+        where: { id: contribution.cycleId, status: 'ACTIVE' },
+        data: { totalCollected: { increment: amount } },
+      });
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            actorId: 'admin-1',
+            action: 'PAYMENT_VERIFIED',
+          }),
+        }),
+      );
+      expect(notifications.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('credits only once when approval requests overlap', async () => {
+      let credited = false;
+      prisma.contribution.updateMany.mockImplementation(async () => {
+        if (credited) return { count: 0 };
+        credited = true;
+        return { count: 1 };
+      });
+      const results = await Promise.allSettled([
+        service.verify(committee.id, payment.id, 'admin-1'),
+        service.verify(committee.id, payment.id, 'admin-1'),
       ]);
-
-      const result = await service.verify(committeeId, 'pay-1', adminId);
-
-      expect(result.status).toBe('VERIFIED');
-      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(
+        results.filter((result) => result.status === 'fulfilled'),
+      ).toHaveLength(1);
+      expect(
+        results.filter((result) => result.status === 'rejected'),
+      ).toHaveLength(1);
+      expect(prisma.cycle.updateMany).toHaveBeenCalledTimes(1);
+      expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
     });
 
-    it('should reject if payment is not PENDING', async () => {
-      const verifiedPayment = {
-        ...mockPayment,
-        status: 'VERIFIED',
-        contribution: { ...mockPayment.contribution, cycle: { ...mockCycle, committeeId } },
-      };
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.payment.findFirst.mockResolvedValue(verifiedPayment);
-
-      await expect(
-        service.verify(committeeId, 'pay-1', adminId),
-      ).rejects.toThrow(BadRequestException);
-    });
-
-    it('should reject if user is not committee admin', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue({
-        ...mockCommittee,
-        createdBy: otherAdminId,
+    it('cannot approve a claim without a receipt', async () => {
+      prisma.payment.findUniqueOrThrow.mockResolvedValue({
+        ...payment,
+        receipt: null,
       });
-
       await expect(
-        service.verify(committeeId, 'pay-1', adminId),
-      ).rejects.toThrow(ForbiddenException);
+        service.verify(committee.id, payment.id, 'admin-1'),
+      ).rejects.toThrow(BadRequestException);
+      expect(prisma.contribution.updateMany).not.toHaveBeenCalled();
     });
 
-    it('should reject if payment belongs to different committee', async () => {
-      const paymentOtherComm = {
-        ...mockPayment,
-        contribution: { ...mockPayment.contribution, cycle: { committeeId: 'other-comm' } },
-      };
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.payment.findFirst.mockResolvedValue(paymentOtherComm);
-
+    it('cannot credit an obligation already settled by another claim', async () => {
+      prisma.contribution.updateMany.mockResolvedValue({ count: 0 });
       await expect(
-        service.verify(committeeId, 'pay-1', adminId),
-      ).rejects.toThrow(ForbiddenException);
+        service.verify(committee.id, payment.id, 'admin-1'),
+      ).rejects.toThrow(ConflictException);
+      expect(prisma.cycle.updateMany).not.toHaveBeenCalled();
+      expect(prisma.payment.update).not.toHaveBeenCalled();
     });
 
-    it('should throw NotFoundException for non-existent payment', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.payment.findFirst.mockResolvedValue(null);
-
+    it('cannot approve against a closed cycle', async () => {
+      prisma.cycle.updateMany.mockResolvedValue({ count: 0 });
       await expect(
-        service.verify(committeeId, 'nonexistent', adminId),
+        service.verify(committee.id, payment.id, 'admin-1'),
+      ).rejects.toThrow(BadRequestException);
+      expect(prisma.payment.update).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('checks the persisted payment amount before approval', async () => {
+      prisma.payment.findUniqueOrThrow.mockResolvedValue({
+        ...payment,
+        amount: new Prisma.Decimal(1),
+      });
+      await expect(
+        service.verify(committee.id, payment.id, 'admin-1'),
+      ).rejects.toThrow(BadRequestException);
+      expect(prisma.contribution.updateMany).not.toHaveBeenCalled();
+    });
+
+    it.each(['verify', 'reject'] as const)(
+      'requires the committee owner to %s',
+      async (method) => {
+        await expect(
+          service[method](committee.id, payment.id, 'user-1'),
+        ).rejects.toThrow(ForbiddenException);
+        await expect(
+          service[method](committee.id, payment.id, 'other-admin'),
+        ).rejects.toThrow(ForbiddenException);
+      },
+    );
+
+    it.each(['VERIFIED', 'REJECTED'])(
+      'cannot decide a %s payment again',
+      async (status) => {
+        prisma.payment.findUniqueOrThrow.mockResolvedValue({
+          ...payment,
+          status,
+        });
+        await expect(
+          service.verify(committee.id, payment.id, 'admin-1'),
+        ).rejects.toThrow(BadRequestException);
+        await expect(
+          service.reject(committee.id, payment.id, 'admin-1'),
+        ).rejects.toThrow(BadRequestException);
+        expect(prisma.contribution.updateMany).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rejects missing payments', async () => {
+      prisma.payment.findUnique.mockResolvedValue(null);
+      await expect(
+        service.verify(committee.id, payment.id, 'admin-1'),
       ).rejects.toThrow(NotFoundException);
+    });
+
+    it('rejects without changing dues, totals or receipt history', async () => {
+      prisma.payment.update.mockResolvedValue({
+        ...payment,
+        status: 'REJECTED',
+      });
+      await expect(
+        service.reject(committee.id, payment.id, 'admin-1'),
+      ).resolves.toHaveProperty('status', 'REJECTED');
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ action: 'PAYMENT_REJECTED' }),
+        }),
+      );
+      expect(prisma.contribution.updateMany).not.toHaveBeenCalled();
+      expect(prisma.cycle.updateMany).not.toHaveBeenCalled();
+      expect(storage.remove).not.toHaveBeenCalled();
+    });
+
+    it('propagates audit failures without sending a success notification', async () => {
+      prisma.auditLog.create.mockRejectedValue(new Error('audit failed'));
+      await expect(
+        service.verify(committee.id, payment.id, 'admin-1'),
+      ).rejects.toThrow('audit failed');
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('does not report a committed payment as failed when notification delivery fails', async () => {
+      notifications.create.mockRejectedValue(new Error('notification failure'));
+      await expect(
+        service.verify(committee.id, payment.id, 'admin-1'),
+      ).resolves.toHaveProperty('status', 'VERIFIED');
     });
   });
 
-  describe('reject', () => {
-    it('should reject a PENDING payment', async () => {
-      const paymentWithCycle = {
-        ...mockPayment,
-        contribution: { ...mockPayment.contribution, cycle: { ...mockCycle, committeeId } },
-      };
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.payment.findFirst.mockResolvedValue(paymentWithCycle);
-      mockPrisma.payment.update.mockResolvedValue({
-        ...mockPayment,
-        status: 'REJECTED',
-        verifiedAt: new Date(),
-      });
+  it('lists committee payments with status and pagination', async () => {
+    prisma.payment.findMany.mockResolvedValue([payment]);
+    prisma.payment.count.mockResolvedValue(1);
+    await expect(
+      service.findAll(
+        committee.id,
+        { status: 'PENDING', page: 2, limit: 5 },
+        'admin-1',
+      ),
+    ).resolves.toMatchObject({ total: 1, page: 2, limit: 5 });
+    expect(prisma.payment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          contribution: { cycle: { committeeId: committee.id } },
+          status: 'PENDING',
+        },
+        skip: 5,
+        take: 5,
+      }),
+    );
+  });
 
-      const result = await service.reject(committeeId, 'pay-1', adminId);
-
-      expect(result.status).toBe('REJECTED');
-      expect(result.verifiedAt).toBeTruthy();
-    });
-
-    it('should reject if payment is already VERIFIED', async () => {
-      const verifiedPayment = {
-        ...mockPayment,
-        status: 'VERIFIED',
-        contribution: { ...mockPayment.contribution, cycle: { ...mockCycle, committeeId } },
-      };
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.payment.findFirst.mockResolvedValue(verifiedPayment);
-
-      await expect(
-        service.reject(committeeId, 'pay-1', adminId),
-      ).rejects.toThrow(BadRequestException);
-    });
-
-    it('should reject if user is not committee admin', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue({
-        ...mockCommittee,
-        createdBy: otherAdminId,
-      });
-
-      await expect(
-        service.reject(committeeId, 'pay-1', adminId),
-      ).rejects.toThrow(ForbiddenException);
-    });
-
-    it('should throw NotFoundException for non-existent payment', async () => {
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.payment.findFirst.mockResolvedValue(null);
-
-      await expect(
-        service.reject(committeeId, 'nonexistent', adminId),
-      ).rejects.toThrow(NotFoundException);
-    });
-
-    it('should not change contribution status when rejecting', async () => {
-      const paymentWithCycle = {
-        ...mockPayment,
-        contribution: { ...mockPayment.contribution, cycle: { ...mockCycle, committeeId } },
-      };
-      mockPrisma.committee.findUnique.mockResolvedValue(mockCommittee);
-      mockPrisma.payment.findFirst.mockResolvedValue(paymentWithCycle);
-      mockPrisma.payment.update.mockResolvedValue({
-        ...mockPayment,
-        status: 'REJECTED',
-      });
-
-      await service.reject(committeeId, 'pay-1', adminId);
-
-      expect(mockPrisma.contribution.update).not.toHaveBeenCalled();
-    });
+  it('returns 404 for missing committees and payments', async () => {
+    prisma.committee.findUnique.mockResolvedValueOnce(null);
+    await expect(
+      service.findOne(committee.id, payment.id, 'user-1'),
+    ).rejects.toThrow(NotFoundException);
+    prisma.payment.findFirst.mockResolvedValue(null);
+    await expect(
+      service.findOne(committee.id, payment.id, 'user-1'),
+    ).rejects.toThrow(NotFoundException);
   });
 });

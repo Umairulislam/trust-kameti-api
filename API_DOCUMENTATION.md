@@ -1455,66 +1455,83 @@ Cookie: jwt=<admin-token>
 
 ## Payments
 
-Members record (claim) payments against their contributions; the committee admin then
-verifies or rejects them. Verification atomically marks the contribution `PAID`,
-increments the cycle's `totalCollected`, writes a `PAYMENT_VERIFIED` audit entry, and
-notifies the member. A payment is always attributed to the contribution's member, even
-when the admin records it on someone's behalf.
+Members transfer money externally using Easypaisa, JazzCash, a bank account or another
+manual channel. The API records the claim and its receipt; it does not transfer money
+or independently confirm the transaction.
+
+Flow: create a `PENDING` claim ? upload its receipt ? admin checks the receiving
+account ? admin verifies or rejects. Both creation and upload leave dues and cycle
+totals unchanged. Only admin approval marks the contribution `PAID`.
+
+Members can submit only their own contributions. The committee creator may record
+and upload on behalf of a member; the payment remains attributed to that member.
+The existing committee-wide payment list remains available to active members for
+transparency, but receipt image access is restricted to the paying member and creator.
 
 ### POST /committees/:committeeId/payments
 
-Record a payment claim for a contribution (status starts `PENDING`). The payment is
-attributed to the contribution's member, not to the submitting user.
+Create a payment claim. Upload the receipt afterwards using the returned payment ID.
 
-**Auth:** Committee Member
+**Auth:** Active Committee Member (own contribution) or Committee Creator.
+
+**Content-Type:** `application/json`
 
 **Request body:**
 
 | Field | Type | Required | Constraints |
 |---|---|---|---|
-| contributionId | string | yes | non-empty; must belong to this committee |
-| amount | number | yes | ≥ 0.01, max 2 decimal places; must match the contribution amount (±0.01) |
-| transactionReference | string | yes | non-empty |
+| contributionId | string | yes | non-empty; must belong to this committee and an ACTIVE cycle |
+| amount | number | yes | ? 0.01, max 2 decimal places; must match the contribution exactly |
+| transactionReference | string | yes | trimmed, non-empty, max 200 characters |
+| paymentMethod | enum | no | `EASYPAISA`, `JAZZCASH`, `BANK_TRANSFER`, `OTHER`; omitted = null for backwards compatibility |
 
-**Success response (`201`):** payment with nested `contribution` (incl. `contribution.member.user`).
+The backend stores the contribution's amount. Client-supplied status, ownership and
+receipt paths are not accepted. Only one pending claim per contribution is allowed.
+After rejection, create a new claim and upload a new receipt; historical evidence is retained.
 
-**Key errors:** `400` contribution already paid, or amount does not match the contribution amount · `403` no access to the committee, or contribution belongs to another committee · `404` committee or contribution not found
-
-**Example:**
+**Example request:**
 
 ```http
 POST /committees/c9a1b2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d/payments
 Cookie: jwt=<token>
+Content-Type: application/json
 ```
 
 ```json
 {
   "contributionId": "c6d7e8f9-0a1b-4c2d-3e4f-5a6b7c8d9e0f",
   "amount": 5000,
-  "transactionReference": "TRX-2026-1004"
+  "transactionReference": "TRX-2026-1004",
+  "paymentMethod": "EASYPAISA"
 }
 ```
 
-Response (`201`):
+**Success response (`201`):**
 
 ```json
 {
   "id": "c5d6e7f8-9a0b-4c1d-2e3f-4a5b6c7d8e9f",
   "contributionId": "c6d7e8f9-0a1b-4c2d-3e4f-5a6b7c8d9e0f",
   "memberId": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
-  "amount": "5000.00",
+  "amount": "5000",
   "transactionReference": "TRX-2026-1004",
+  "paymentMethod": "EASYPAISA",
   "status": "PENDING",
   "paidAt": "2026-10-03T09:45:00.000Z",
   "verifiedAt": null,
   "createdAt": "2026-10-03T09:45:00.000Z",
   "updatedAt": "2026-10-03T09:45:00.000Z",
+  "receipt": null,
   "contribution": {
     "id": "c6d7e8f9-0a1b-4c2d-3e4f-5a6b7c8d9e0f",
     "cycleId": "f2a3b4c5-6d7e-4f8a-9b0c-1d2e3f4a5b6c",
     "memberId": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
-    "amount": "5000.00",
+    "amount": "5000",
     "status": "PENDING",
+    "cycle": {
+      "committeeId": "c9a1b2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "status": "ACTIVE"
+    },
     "member": {
       "id": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
       "role": "MEMBER",
@@ -1530,30 +1547,33 @@ Response (`201`):
 }
 ```
 
+`paidAt` is the claim-recorded timestamp inherited from the existing model, not proof
+of receipt or a bank-confirmed transfer time. `verifiedAt` remains null until the admin
+makes a decision. Amounts are serialised as decimal strings.
+
+**Key errors:** `400` invalid body, amount mismatch, already paid or cycle not ACTIVE;
+`401` unauthenticated; `403` missing active membership, another member's contribution
+or wrong committee; `404` committee/contribution missing; `409` pending claim already exists.
+
 ### GET /committees/:committeeId/payments
 
-List payments across all of the committee's cycles, newest first.
+List payments across the committee's cycles, newest first. Includes `paymentMethod`,
+receipt metadata (or null), and the nested contribution shown in the creation response.
+Receipt metadata does not grant access to its image.
 
-**Auth:** Committee Member
+**Auth:** Active Committee Member or Committee Creator.
 
-**Query params:**
+**Request body:** None.
 
-| Param | Type | Default | Notes |
+| Query parameter | Type | Default | Notes |
 |---|---|---|---|
-| status | enum `PaymentStatus` (`PENDING` \| `VERIFIED` \| `REJECTED`) | — | filter |
-| page | integer ≥ 1 | 1 | |
-| limit | integer ≥ 1 | 10 | |
+| status | `PENDING` / `VERIFIED` / `REJECTED` | ? | optional filter |
+| page | integer ? 1 | 1 | |
+| limit | integer ? 1 | 10 | |
 
-**Success response (`200`):** pagination envelope of payments with nested `contribution`.
+**Example:** `GET /committees/:committeeId/payments?status=PENDING&page=1&limit=10`
 
-**Key errors:** `403` no access · `404` committee not found
-
-**Example:**
-
-```http
-GET /committees/c9a1b2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d/payments?status=VERIFIED&page=1&limit=10
-Cookie: jwt=<token>
-```
+**Success response (`200`):**
 
 ```json
 {
@@ -1562,19 +1582,25 @@ Cookie: jwt=<token>
       "id": "c5d6e7f8-9a0b-4c1d-2e3f-4a5b6c7d8e9f",
       "contributionId": "c6d7e8f9-0a1b-4c2d-3e4f-5a6b7c8d9e0f",
       "memberId": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
-      "amount": "5000.00",
+      "amount": "5000",
       "transactionReference": "TRX-2026-1004",
-      "status": "VERIFIED",
+      "paymentMethod": "EASYPAISA",
+      "status": "PENDING",
       "paidAt": "2026-10-03T09:45:00.000Z",
-      "verifiedAt": "2026-10-03T11:00:00.000Z",
+      "verifiedAt": null,
       "createdAt": "2026-10-03T09:45:00.000Z",
-      "updatedAt": "2026-10-03T11:00:00.000Z",
+      "updatedAt": "2026-10-03T09:45:00.000Z",
+      "receipt": null,
       "contribution": {
         "id": "c6d7e8f9-0a1b-4c2d-3e4f-5a6b7c8d9e0f",
         "cycleId": "f2a3b4c5-6d7e-4f8a-9b0c-1d2e3f4a5b6c",
         "memberId": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
-        "amount": "5000.00",
-        "status": "PAID",
+        "amount": "5000",
+        "status": "PENDING",
+        "cycle": {
+          "committeeId": "c9a1b2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+          "status": "ACTIVE"
+        },
         "member": {
           "id": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
           "role": "MEMBER",
@@ -1595,134 +1621,237 @@ Cookie: jwt=<token>
 }
 ```
 
+**Key errors:** `401` unauthenticated; `403` no access; `404` committee missing.
+
 ### GET /committees/:committeeId/payments/:id
 
-Get a single payment.
+Get one payment, including its method, receipt metadata and contribution.
 
-**Auth:** Committee Member
+**Auth:** Active Committee Member or Committee Creator.
 
-**Success response (`200`):** payment with nested `contribution` (same shape as the POST response).
+**Request body:** None.
 
-**Key errors:** `403` no access, or payment belongs to another committee · `404` committee or payment not found
+**Success response (`200`):** The complete payment object shown in the creation
+response; `receipt` contains metadata after upload.
 
-**Example:**
+**Key errors:** `401` unauthenticated; `403` no access or wrong committee;
+`404` committee/payment missing.
+
+### POST /committees/:committeeId/payments/:id/receipt
+
+Attach one receipt image to a `PENDING` claim. The contribution must remain unpaid
+and its cycle ACTIVE. Uploading does **not** verify the claim or change financial totals.
+Receipts cannot be replaced or deleted through the API.
+
+**Auth:** Paying Member with active committee membership or Committee Creator.
+
+**Content-Type:** `multipart/form-data`
+
+**Request body:**
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| receipt | binary file | yes | one PNG or JPEG image, non-empty, maximum 5 MiB (5,242,880 bytes) |
+
+No other fields or files are accepted. The backend checks MIME type and file signatures.
+SVG, PDF and other formats are not supported. Original filenames are not stored or used
+as storage paths.
+
+**Example request:**
 
 ```http
-GET /committees/c9a1b2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d/payments/c5d6e7f8-9a0b-4c1d-2e3f-4a5b6c7d8e9f
+POST /committees/c9a1b2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d/payments/c5d6e7f8-9a0b-4c1d-2e3f-4a5b6c7d8e9f/receipt
+Cookie: jwt=<token>
+Content-Type: multipart/form-data; boundary=ReceiptBoundary
+
+--ReceiptBoundary
+Content-Disposition: form-data; name="receipt"; filename="receipt.png"
+Content-Type: image/png
+
+<binary PNG image bytes>
+--ReceiptBoundary--
+```
+
+Browser example (let the browser set the multipart boundary):
+
+```typescript
+const form = new FormData();
+form.append('receipt', file);
+const response = await fetch(
+  `${apiUrl}/committees/${committeeId}/payments/${paymentId}/receipt`,
+  { method: 'POST', credentials: 'include', body: form },
+);
+const payment = await response.json();
+```
+
+**Success response (`201`):**
+
+```json
+{
+  "id": "c5d6e7f8-9a0b-4c1d-2e3f-4a5b6c7d8e9f",
+  "contributionId": "c6d7e8f9-0a1b-4c2d-3e4f-5a6b7c8d9e0f",
+  "memberId": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
+  "amount": "5000",
+  "transactionReference": "TRX-2026-1004",
+  "paymentMethod": "EASYPAISA",
+  "status": "PENDING",
+  "paidAt": "2026-10-03T09:45:00.000Z",
+  "verifiedAt": null,
+  "createdAt": "2026-10-03T09:45:00.000Z",
+  "updatedAt": "2026-10-03T09:45:00.000Z",
+  "receipt": {
+    "id": "e82d4f88-a3f6-4f92-9f31-fc6c6eac6cf6",
+    "mimeType": "image/png",
+    "size": 84213,
+    "uploadedAt": "2026-10-03T09:46:00.000Z"
+  },
+  "contribution": {
+    "id": "c6d7e8f9-0a1b-4c2d-3e4f-5a6b7c8d9e0f",
+    "cycleId": "f2a3b4c5-6d7e-4f8a-9b0c-1d2e3f4a5b6c",
+    "memberId": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
+    "amount": "5000",
+    "status": "PENDING",
+    "cycle": {
+      "committeeId": "c9a1b2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "status": "ACTIVE"
+    },
+    "member": {
+      "id": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
+      "role": "MEMBER",
+      "status": "ACTIVE",
+      "user": {
+        "id": "b1f3c2a4-5d6e-4f7a-8b9c-0d1e2f3a4b5c",
+        "name": "Ayesha Khan",
+        "email": "ayesha@example.com",
+        "phone": "+92 300 1234567"
+      }
+    }
+  }
+}
+```
+
+A `PAYMENT_RECEIPT_UPLOADED` audit record stores the actor, payment, receipt, committee
+and cycle. Upload failure leaves the existing claim available for a retry.
+
+**Key errors:** `400` missing/invalid image, unexpected multipart fields, non-PENDING
+payment, paid contribution or inactive cycle; `401` unauthenticated;
+`403` not the paying member/creator or wrong committee; `404` committee/payment missing;
+`409` receipt already attached; `413` file too large; `500` storage failure.
+
+Example validation error (`400`):
+
+```json
+{
+  "message": "Receipt must be a PNG or JPEG image",
+  "error": "Bad Request",
+  "statusCode": 400
+}
+```
+
+### GET /committees/:committeeId/payments/:id/receipt
+
+Read the private receipt image, including receipts retained after approval or rejection.
+
+**Auth:** Paying Member with active committee membership or Committee Creator.
+
+**Request body:** None.
+
+**Example request:**
+
+```http
+GET /committees/c9a1b2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d/payments/c5d6e7f8-9a0b-4c1d-2e3f-4a5b6c7d8e9f/receipt
 Cookie: jwt=<token>
 ```
 
-Response (`200`): same payment shape as shown above.
+**Success response (`200`):** Binary image bytes, **not JSON**.
+
+```http
+HTTP/1.1 200 OK
+Content-Type: image/png
+Content-Disposition: inline; filename="receipt.png"
+Content-Length: 84213
+Cache-Control: private, no-store
+X-Content-Type-Options: nosniff
+
+<binary PNG image bytes>
+```
+
+For JPEG, the content type is `image/jpeg` and filename is `receipt.jpg`.
+For a dashboard preview, fetch with `credentials: 'include'`, read `response.blob()`,
+create an object URL and revoke it when the preview is removed.
+
+**Key errors:** `401` unauthenticated; `403` no receipt access or wrong committee;
+`404` committee, payment, receipt or stored file missing; `500` storage read failure.
+
+Example missing-receipt response (`404`):
+
+```json
+{
+  "message": "Receipt not found",
+  "error": "Not Found",
+  "statusCode": 404
+}
+```
 
 ### POST /committees/:committeeId/payments/:id/verify
 
-Verify a `PENDING` payment (**no request body** — see
-[Notes and Known Ambiguities](#notes-and-known-ambiguities)). In a single transaction:
-the payment becomes `VERIFIED` (stamps `verifiedAt`), the contribution becomes `PAID`
-(stamps `paidAt`, links `paymentId`), the cycle's `totalCollected` is incremented by the
-payment amount, and a `PAYMENT_VERIFIED` audit entry is written. The member is notified.
+Approve a `PENDING` claim **after checking the receiving account's transaction history**.
+A receipt is required, including for pending claims created before this feature.
+The payment amount must match the contribution and the cycle must still be ACTIVE.
 
-**Auth:** Platform Admin + Committee Admin
+**Auth:** Platform ADMIN + Committee Creator.
 
-**Success response (`200`):** updated payment with nested `contribution` (contribution now `PAID`).
+**Request body:** None.
 
-**Key errors:** `400` payment is not `PENDING` · `403` not committee admin, or payment belongs to another committee · `404` committee or payment not found
+**Example:** `POST /committees/:committeeId/payments/:id/verify` with the admin JWT cookie.
 
-**Example:**
+Within one database transaction, approval marks the contribution `PAID`, links its
+payment, increments the cycle total, marks the payment `VERIFIED`, and writes
+`PAYMENT_VERIFIED`. The returned contribution reflects the updated paid status.
+Competing decisions are serialised per contribution to prevent duplicate crediting.
 
-```http
-POST /committees/c9a1b2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d/payments/c5d6e7f8-9a0b-4c1d-2e3f-4a5b6c7d8e9f/verify
-Cookie: jwt=<admin-token>
-```
-
-Response (`200`):
+**Success response (`200`):** Same complete object as the upload response, with these changes:
 
 ```json
 {
-  "id": "c5d6e7f8-9a0b-4c1d-2e3f-4a5b6c7d8e9f",
-  "contributionId": "c6d7e8f9-0a1b-4c2d-3e4f-5a6b7c8d9e0f",
-  "memberId": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
-  "amount": "5000.00",
-  "transactionReference": "TRX-2026-1004",
   "status": "VERIFIED",
-  "paidAt": "2026-10-03T09:45:00.000Z",
   "verifiedAt": "2026-10-03T11:00:00.000Z",
-  "createdAt": "2026-10-03T09:45:00.000Z",
   "updatedAt": "2026-10-03T11:00:00.000Z",
   "contribution": {
-    "id": "c6d7e8f9-0a1b-4c2d-3e4f-5a6b7c8d9e0f",
-    "cycleId": "f2a3b4c5-6d7e-4f8a-9b0c-1d2e3f4a5b6c",
-    "memberId": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
-    "amount": "5000.00",
-    "status": "PAID",
-    "member": {
-      "id": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
-      "role": "MEMBER",
-      "status": "ACTIVE",
-      "user": {
-        "id": "b1f3c2a4-5d6e-4f7a-8b9c-0d1e2f3a4b5c",
-        "name": "Ayesha Khan",
-        "email": "ayesha@example.com",
-        "phone": "+92 300 1234567"
-      }
-    }
+    "status": "PAID"
   }
 }
 ```
+
+The member is notified after commit. A notification delivery failure is logged and
+does not turn a committed payment into a failed HTTP operation.
+
+**Key errors:** `400` payment not PENDING, missing receipt, amount mismatch or inactive
+cycle; `401` unauthenticated; `403` not the platform admin/creator or wrong committee;
+`404` committee/payment missing; `409` contribution already credited.
 
 ### POST /committees/:committeeId/payments/:id/reject
 
-Reject a `PENDING` payment (**no request body**). Sets status `REJECTED`, stamps
-`verifiedAt`, writes a `PAYMENT_REJECTED` audit entry, and notifies the member. The
-contribution is left untouched (it remains `PENDING`/`OVERDUE`).
+Reject a `PENDING` claim. A receipt is not required, so incomplete claims can be rejected.
+Receipt evidence is retained and financial totals remain unchanged.
 
-**Auth:** Platform Admin + Committee Admin
+**Auth:** Platform ADMIN + Committee Creator.
 
-**Success response (`200`):** updated payment with nested `contribution`.
+**Request body:** None.
 
-**Key errors:** `400` payment is not `PENDING` · `403` not committee admin, or payment belongs to another committee · `404` committee or payment not found
+**Example:** `POST /committees/:committeeId/payments/:id/reject` with the admin JWT cookie.
 
-**Example:**
+**Success response (`200`):** Same complete payment object, with `status: "REJECTED"`
+and updated `verifiedAt`/`updatedAt`; contribution status remains `PENDING` or `OVERDUE`.
+The existing `verifiedAt` field records the admin decision time for both outcomes.
 
-```http
-POST /committees/c9a1b2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d/payments/c5d6e7f8-9a0b-4c1d-2e3f-4a5b6c7d8e9f/reject
-Cookie: jwt=<admin-token>
-```
+Rejection and its `PAYMENT_REJECTED` audit record are committed together. The member
+is notified after commit. Resubmit using a new claim to preserve the old receipt and decision.
 
-Response (`200`):
+**Key errors:** `400` payment not PENDING; `401` unauthenticated;
+`403` not the platform admin/creator or wrong committee; `404` committee/payment missing.
 
-```json
-{
-  "id": "c5d6e7f8-9a0b-4c1d-2e3f-4a5b6c7d8e9f",
-  "contributionId": "c6d7e8f9-0a1b-4c2d-3e4f-5a6b7c8d9e0f",
-  "memberId": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
-  "amount": "5000.00",
-  "transactionReference": "TRX-2026-1004",
-  "status": "REJECTED",
-  "paidAt": "2026-10-03T09:45:00.000Z",
-  "verifiedAt": "2026-10-03T11:00:00.000Z",
-  "createdAt": "2026-10-03T09:45:00.000Z",
-  "updatedAt": "2026-10-03T11:00:00.000Z",
-  "contribution": {
-    "id": "c6d7e8f9-0a1b-4c2d-3e4f-5a6b7c8d9e0f",
-    "cycleId": "f2a3b4c5-6d7e-4f8a-9b0c-1d2e3f4a5b6c",
-    "memberId": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
-    "amount": "5000.00",
-    "status": "PENDING",
-    "member": {
-      "id": "d0e1f2a3-4b5c-4d6e-8f9a-0b1c2d3e4f5a",
-      "role": "MEMBER",
-      "status": "ACTIVE",
-      "user": {
-        "id": "b1f3c2a4-5d6e-4f7a-8b9c-0d1e2f3a4b5c",
-        "name": "Ayesha Khan",
-        "email": "ayesha@example.com",
-        "phone": "+92 300 1234567"
-      }
-    }
-  }
-}
-```
+
 
 ---
 
